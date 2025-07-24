@@ -29,6 +29,9 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.PowerManager;
 import android.provider.Settings;
+import android.text.Editable;
+import android.text.TextWatcher;
+import android.text.TextUtils;
 import android.view.LayoutInflater;
 import android.view.Menu;
 import android.view.MenuItem;
@@ -37,6 +40,7 @@ import android.view.ViewGroup;
 import android.view.Window;
 import android.view.accessibility.AccessibilityManager;
 import android.widget.BaseAdapter;
+import android.widget.EditText;
 import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.ListView;
@@ -52,7 +56,11 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 import rikka.shizuku.Shizuku;
@@ -68,6 +76,8 @@ public class MainActivity extends Activity {
     PackageManager pm;
     boolean perm = false;
     private boolean listenerAdded = false;
+    private adapter listAdapter;
+    private EditText searchEditText;
 
     //自定义一个内容监视器
     class SettingsValueChangeContentObserver extends ContentObserver {
@@ -81,21 +91,12 @@ public class MainActivity extends Activity {
             //更新settingValue，并与APP内的tmpsettingValue作比对。如果不同，则说明本次设置项改变来自APP外部，于是刷新一下主界面的列表。相同则说明这次改变就是本APP改的，无需处理。
             settingValue = Settings.Secure.getString(getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
             if (settingValue == null) settingValue = "";
-            if (!settingValue.equals(tmpSettingValue))
-                runOnUiThread(new Runnable() {
-                    @Override
-                    public void run() {
-                        int firstPosition = listView.getFirstVisiblePosition();
-                        int lastPosition = listView.getLastVisiblePosition();
-                        for (int i = firstPosition; i <= lastPosition; i++) {
-                            View view = listView.getChildAt(i - firstPosition);
-                            String[] packageName = Pattern.compile("/").split(tmp.get(i).getId());
-                            boolean isChecked = settingValue.contains(packageName[0] + "/" + packageName[1]) || settingValue.contains(packageName[0] + "/" + packageName[0] + packageName[1]);
-                            (view.findViewById(R.id.ib)).setVisibility(isChecked ? View.VISIBLE : View.INVISIBLE);
-                            ((Switch) view.findViewById(R.id.s)).setChecked(isChecked);
-                        }
-                    }
-                });
+            if (!settingValue.equals(tmpSettingValue)) {
+                // 当设置从外部更改时，刷新整个列表
+                if (listAdapter != null) {
+                    listAdapter.notifyDataSetChanged();
+                }
+            }
         }
     }
 
@@ -111,6 +112,24 @@ public class MainActivity extends Activity {
         }
 
         setContentView(R.layout.activity_main);
+        searchEditText = findViewById(R.id.search_edit_text);
+        searchEditText.addTextChangedListener(new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {
+            }
+
+            @Override
+            public void onTextChanged(CharSequence s, int start, int before, int count) {
+                if (listAdapter != null) {
+                    listAdapter.filter(s.toString());
+                }
+            }
+
+            @Override
+            public void afterTextChanged(Editable s) {
+            }
+        });
+
 
         //设置导航栏透明，UI会好看些
         Window window = getWindow();
@@ -142,8 +161,12 @@ public class MainActivity extends Activity {
         sp = getSharedPreferences("data", 0);
 
         //读取用户设置“是否隐藏后台”，并进行隐藏后台
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP)
-            ((ActivityManager) getSystemService(Service.ACTIVITY_SERVICE)).getAppTasks().get(0).setExcludeFromRecents(sp.getBoolean("hide", true));
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            List<ActivityManager.AppTask> tasks = ((ActivityManager) getSystemService(Service.ACTIVITY_SERVICE)).getAppTasks();
+            if (tasks != null && !tasks.isEmpty()) {
+                tasks.get(0).setExcludeFromRecents(sp.getBoolean("hide", true));
+            }
+        }
 
         daemon = sp.getString("daemon", "");
         top = sp.getString("top", "");
@@ -160,8 +183,6 @@ public class MainActivity extends Activity {
 
 
         //初次使用触发
-
-
         if (sp.getBoolean("first", true)) {
             new AlertDialog.Builder(this)
                     .setTitle("隐私政策")
@@ -173,19 +194,14 @@ public class MainActivity extends Activity {
 
         //如果设备一次都没打开过无障碍设置界面，则下面这个设置项值不存在，同时本APP是无法获取到无障碍设置列表的。所以要在这里加个判断，如果从来没开启过，则需要本APP来给这个设置项写入1来开启。
         if (Settings.Secure.getString(getContentResolver(), Settings.Secure.ACCESSIBILITY_ENABLED) != null) {
-            runOnUiThread(new Runnable() {
-                @Override
-                public void run() {
-                    listView.setAdapter(new adapter(tmp));
-                }
-            });
+            listAdapter = new adapter(tmp);
+            listView.setAdapter(listAdapter);
             for (int i = 0; i < l.size(); i++) {
                 AccessibilityServiceInfo info = l.get(i);
                 if (daemon.contains(info.getId())) {
                     StartForeGroundDaemon();
                 }
             }
-
         } else {
             new AlertDialog.Builder(this).setMessage("您的设备尚未启用无障碍服务功能。您可以选择在系统设置-无障碍-打开或关闭任意服务项来激活系统的无障碍服务功能，也可以授权本APP安全设置写入权限以解决.")
                     .setNegativeButton("root激活", new DialogInterface.OnClickListener() {
@@ -235,12 +251,19 @@ public class MainActivity extends Activity {
             public int compare(AccessibilityServiceInfo info1, AccessibilityServiceInfo info2) {
                 String id = info1.getId();
                 String id2 = info2.getId();
-                if (top.contains(id2)) {
-                    return (!top.contains(id) || top.indexOf(id) <= top.indexOf(id2)) ? 1 : -1;
-                } else if (top.contains(id)) {
+                boolean isTop1 = top.contains(id);
+                boolean isTop2 = top.contains(id2);
+                if (isTop1 && !isTop2) {
                     return -1;
                 }
-                return 0;
+                if (!isTop1 && isTop2) {
+                    return 1;
+                }
+                if (isTop1 && isTop2) {
+                    // 如果两个都在置顶列表，则按照它们在置顶字符串中的位置排序
+                    return top.indexOf(id) - top.indexOf(id2);
+                }
+                return 0; // 保持原始顺序
             }
         });
     }
@@ -331,7 +354,10 @@ public class MainActivity extends Activity {
             sp.edit().putBoolean("hide", !menuItem.isChecked()).apply();
             menuItem.setChecked(!menuItem.isChecked());
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                ((ActivityManager) getSystemService(Service.ACTIVITY_SERVICE)).getAppTasks().get(0).setExcludeFromRecents(sp.getBoolean("hide", true));
+                List<ActivityManager.AppTask> tasks = ((ActivityManager) getSystemService(Service.ACTIVITY_SERVICE)).getAppTasks();
+                if (tasks != null && !tasks.isEmpty()) {
+                    tasks.get(0).setExcludeFromRecents(sp.getBoolean("hide", true));
+                }
             }
         }
         return super.onMenuItemSelected(i, menuItem);
@@ -339,12 +365,56 @@ public class MainActivity extends Activity {
 
     //这个是用于适配列表中的每一项设置项的显示
     public class adapter extends BaseAdapter {
-        private final List<AccessibilityServiceInfo> list;
+        private List<AccessibilityServiceInfo> list;
+        private final List<AccessibilityServiceInfo> originalList;
 
 
         public adapter(List<AccessibilityServiceInfo> list) {
             super();
-            this.list = list;
+            this.originalList = new ArrayList<>(list);
+            this.list = new ArrayList<>(list);
+        }
+
+        public void filter(String charText) {
+            charText = charText.toLowerCase(Locale.getDefault());
+            list.clear();
+            if (charText.length() == 0) {
+                list.addAll(originalList);
+            } else {
+                for (AccessibilityServiceInfo info : originalList) {
+                    String serviceName = info.getId();
+                    String[] packageName = Pattern.compile("/").split(serviceName);
+                    String packagelabel = "";
+                    String serviceLabel = "";
+                    String description = "";
+
+                    try {
+                        ApplicationInfo appInfo = pm.getApplicationInfo(packageName[0], PackageManager.GET_META_DATA);
+                        packagelabel = pm.getApplicationLabel(appInfo).toString();
+                        serviceLabel = info.getResolveInfo().loadLabel(pm).toString();
+                        
+                        CharSequence desc = info.loadDescription(pm);
+                        if (desc != null) {
+                            description = desc.toString();
+                        }
+
+                    } catch (PackageManager.NameNotFoundException ignored) {
+                    }
+                    
+                    if (packagelabel.toLowerCase(Locale.getDefault()).contains(charText) ||
+                        serviceLabel.toLowerCase(Locale.getDefault()).contains(charText) ||
+                        description.toLowerCase(Locale.getDefault()).contains(charText)) {
+                        list.add(info);
+                    }
+                }
+            }
+            notifyDataSetChanged();
+        }
+
+        public void updateData(List<AccessibilityServiceInfo> newList) {
+            originalList.clear();
+            originalList.addAll(newList);
+            filter(searchEditText.getText().toString());
         }
 
         public int getCount() {
@@ -353,7 +423,7 @@ public class MainActivity extends Activity {
 
         @Override
         public Object getItem(int position) {
-            return null;
+            return list.get(position);
         }
 
         @Override
@@ -361,17 +431,47 @@ public class MainActivity extends Activity {
             return position;
         }
 
+        /**
+         * 【核心修复】检查指定服务是否在系统中被启用
+         * @param info 要检查的服务
+         * @return 如果已启用则返回 true
+         */
+        private boolean isServiceEnabled(AccessibilityServiceInfo info) {
+            String currentSettingValue = Settings.Secure.getString(getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+            if (TextUtils.isEmpty(currentSettingValue)) {
+                return false;
+            }
+            // 获取当前服务的 ComponentName
+            ComponentName serviceComponent = new ComponentName(info.getResolveInfo().serviceInfo.packageName, info.getResolveInfo().serviceInfo.name);
+            // 将系统设置字符串分割成单个服务组件字符串
+            TextUtils.SimpleStringSplitter splitter = new TextUtils.SimpleStringSplitter(':');
+            splitter.setString(currentSettingValue);
+            while (splitter.hasNext()) {
+                String enabledServiceStr = splitter.next();
+                ComponentName enabledComponent = ComponentName.unflattenFromString(enabledServiceStr);
+                if (serviceComponent.equals(enabledComponent)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         public View getView(int position, View convertView, ViewGroup parent) {
             ViewHolder holder;
-            convertView = LayoutInflater.from(MainActivity.this).inflate(R.layout.item, null);
-            holder = new ViewHolder();
-            holder.texta = convertView.findViewById(R.id.a);
-            holder.textb = convertView.findViewById(R.id.b);
-            holder.imageView = convertView.findViewById(R.id.c);
-            holder.sw = convertView.findViewById(R.id.s);
-            holder.ib = convertView.findViewById(R.id.ib);
-            convertView.setTag(holder);
-            AccessibilityServiceInfo info = list.get(position);
+            if (convertView == null) {
+                convertView = LayoutInflater.from(MainActivity.this).inflate(R.layout.item, null);
+                holder = new ViewHolder();
+                holder.texta = convertView.findViewById(R.id.a);
+                holder.textb = convertView.findViewById(R.id.b);
+                holder.imageView = convertView.findViewById(R.id.c);
+                holder.sw = convertView.findViewById(R.id.s);
+                holder.ib = convertView.findViewById(R.id.ib);
+                convertView.setTag(holder);
+            } else {
+                holder = (ViewHolder) convertView.getTag();
+            }
+
+            final AccessibilityServiceInfo info = list.get(position);
             String serviceName = info.getId();
             String[] packageName = Pattern.compile("/").split(serviceName);
             Drawable icon = null;
@@ -381,8 +481,12 @@ public class MainActivity extends Activity {
             try {
                 icon = pm.getApplicationIcon(packageName[0]);
                 Packagelabel = String.valueOf(pm.getApplicationLabel(pm.getApplicationInfo(packageName[0], PackageManager.GET_META_DATA)));
-                ServiceLabel = pm.getServiceInfo(new ComponentName(packageName[0], packageName[0] + packageName[1]), PackageManager.MATCH_DEFAULT_ONLY).loadLabel(pm).toString();
-                Description = info.loadDescription(pm);
+                ServiceLabel = info.getResolveInfo().loadLabel(pm).toString();
+                CharSequence desc = info.loadDescription(pm);
+                if (desc != null) {
+                    Description = desc.toString();
+                }
+
             } catch (PackageManager.NameNotFoundException ignored) {
             }
             if (ServiceLabel == null) ServiceLabel = Packagelabel;
@@ -392,7 +496,6 @@ public class MainActivity extends Activity {
 
 
             holder.ib.setImageResource(daemon.contains(serviceName) ? R.drawable.lock1 : R.drawable.lock);
-//            holder.sw.setEnabled(!daemon.contains(serviceName));
             holder.ib.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View view) {
@@ -403,37 +506,60 @@ public class MainActivity extends Activity {
                     daemon = daemon.contains(serviceName) ? daemon.replace(serviceName + ":", "") : serviceName + ":" + daemon;
                     sp.edit().putString("daemon", daemon).apply();
                     holder.ib.setImageResource(daemon.contains(serviceName) ? R.drawable.lock1 : R.drawable.lock);
-//                    holder.sw.setEnabled(!daemon.contains(serviceName));
                     StartForeGroundDaemon();
                 }
             });
-            holder.sw.setChecked(settingValue.contains(packageName[0] + "/" + packageName[1]) || settingValue.contains(packageName[0] + "/" + packageName[0] + packageName[1]));
-            holder.ib.setVisibility(holder.sw.isChecked() ? View.VISIBLE : View.INVISIBLE);
+
+            // 【核心修复】使用新的 isServiceEnabled 方法来准确判断开关状态
+            boolean isEnabled = isServiceEnabled(info);
+            holder.sw.setChecked(isEnabled);
+            holder.ib.setVisibility(isEnabled ? View.VISIBLE : View.INVISIBLE);
+            
             holder.sw.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View view) {
                     if (checkPermission()) {
                         createPermissionDialog();
                         holder.sw.setChecked(!holder.sw.isChecked());
-                    } else {
-
-                        String s = Settings.Secure.getString(getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
-                        if (s == null) s = "";
-
-                        if (holder.sw.isChecked())
-                            tmpSettingValue = serviceName + ":" + s;
-                        else
-                            tmpSettingValue = s.replace(serviceName + ":", "").replace(packageName[0] + "/" + packageName[0] + packageName[1] + ":", "").replace(serviceName, "").replace(packageName[0] + "/" + packageName[0] + packageName[1], "").replace(serviceName, "");
-
-                        Settings.Secure.putString(getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, tmpSettingValue);
-                        holder.ib.setVisibility(holder.sw.isChecked() ? View.VISIBLE : View.INVISIBLE);
-
+                        return;
                     }
+
+                    // 【核心修复】使用更可靠的方式来修改设置
+                    String currentSettingValue = Settings.Secure.getString(getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+                    if (currentSettingValue == null) currentSettingValue = "";
+                    Set<String> enabledServices = new HashSet<>(Arrays.asList(currentSettingValue.split(":")));
+                    
+                    if (holder.sw.isChecked()) {
+                        // 启用服务
+                        enabledServices.add(serviceName);
+                    } else {
+                        // 禁用服务
+                        ComponentName serviceComponent = new ComponentName(info.getResolveInfo().serviceInfo.packageName, info.getResolveInfo().serviceInfo.name);
+                        for (Iterator<String> it = enabledServices.iterator(); it.hasNext(); ) {
+                            String enabledServiceStr = it.next();
+                            ComponentName enabledComponent = ComponentName.unflattenFromString(enabledServiceStr);
+                            if (serviceComponent.equals(enabledComponent)) {
+                                it.remove();
+                                break;
+                            }
+                        }
+                    }
+
+                    // 重新构建设置字符串
+                    List<String> updatedList = new ArrayList<>();
+                    for(String s : enabledServices) {
+                        if (s != null && !s.isEmpty()) {
+                            updatedList.add(s);
+                        }
+                    }
+                    tmpSettingValue = TextUtils.join(":", updatedList);
+                    Settings.Secure.putString(getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, tmpSettingValue);
+                    holder.ib.setVisibility(holder.sw.isChecked() ? View.VISIBLE : View.INVISIBLE);
                 }
             });
 
 
-            //点击某个项目的空白处将展示该服务的详细信息，下面的代码是解析各类FLAG的，挺麻烦，不过没别的方法。
+            //点击某个项目的空白处将展示该服务的详细信息
             convertView.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View view) {
@@ -546,17 +672,15 @@ public class MainActivity extends Activity {
                     }
                     sp.edit().putString("top", top).apply();
                     Sort();
-                    runOnUiThread(new Runnable() {
-                        @Override
-                        public void run() {
-                            listView.setAdapter(new adapter(tmp));
-                        }
-                    });
+                    listAdapter.updateData(tmp);
                     return true;
                 }
             });
             if (top.contains(serviceName))
                 convertView.setBackgroundColor(night ? Color.DKGRAY : Color.LTGRAY);
+            else {
+                convertView.setBackgroundColor(Color.TRANSPARENT);
+            }
             return convertView;
         }
 
@@ -618,12 +742,12 @@ public class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
             perm = checkSelfPermission(Manifest.permission.WRITE_SECURE_SETTINGS) == PackageManager.PERMISSION_GRANTED;
         else {
-            PackageInfo packageInfo = new PackageInfo();
             try {
-                packageInfo = getPackageManager().getPackageInfo(getPackageName(), PackageManager.GET_CONFIGURATIONS);
+                PackageInfo packageInfo = getPackageManager().getPackageInfo(getPackageName(), 0);
+                perm = (packageInfo.applicationInfo.flags & ApplicationInfo.FLAG_SYSTEM) != 0;
             } catch (PackageManager.NameNotFoundException ignored) {
             }
-            perm = (packageInfo.applicationInfo.flags & ApplicationInfo.FLAG_SYSTEM) != 0;
+
         }
         return !perm;
     }
@@ -646,8 +770,5 @@ public class MainActivity extends Activity {
             startForegroundService(new Intent(this, daemonService.class));
         else
             startService(new Intent(this, daemonService.class));
-
     }
-
-
 }

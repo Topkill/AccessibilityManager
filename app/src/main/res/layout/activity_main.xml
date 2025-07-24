@@ -5,12 +5,17 @@
     android:gravity="center_horizontal"
     android:orientation="vertical">
 
+    <EditText
+        android:id="@+id/search_edit_text"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="搜索..."
+        android:maxLines="1"
+        android:inputType="text" />
+
     <ListView
         android:id="@+id/list"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:dividerHeight="5dp" />
 </LinearLayout>
-
-
-
